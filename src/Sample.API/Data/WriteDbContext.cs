@@ -14,6 +14,10 @@ public class WriteDbContext(DbContextOptions<WriteDbContext> opts) : DbContext(o
         modelBuilder.Entity<Customer>().HasKey(c => c.Id);
         modelBuilder.Entity<EventStoreEntry>().HasIndex(e => e.EventId).IsUnique();
 
-        modelBuilder.Entity<OutboxMessage>().HasIndex(o => o.MessageId).IsUnique();
+        modelBuilder.Entity<OutboxMessage>(eb =>
+        {
+            eb.HasIndex(o => o.MessageId).IsUnique();
+            eb.Property(o => o.RowVersion).IsRowVersion(); // map to rowversion/timestamp
+        });
     }
 }
