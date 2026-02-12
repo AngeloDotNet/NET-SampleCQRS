@@ -1,4 +1,6 @@
-﻿namespace Sample.API.Entities;
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace Sample.API.Entities;
 
 public class OutboxMessage
 {
@@ -12,4 +14,8 @@ public class OutboxMessage
     public DateTime? DispatchedAt { get; set; }
     public int Attempts { get; set; }
     public string? LastError { get; set; }
+
+    // ROWVERSION for optimistic concurrency (SQL Server)
+    [Timestamp]
+    public byte[]? RowVersion { get; set; }
 }
