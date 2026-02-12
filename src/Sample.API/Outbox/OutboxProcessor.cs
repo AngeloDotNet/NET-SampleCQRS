@@ -6,8 +6,7 @@ using Sample.API.Settings;
 
 namespace Sample.API.Outbox;
 
-public class OutboxProcessor(IServiceScopeFactory scopeFactory, IOptions<OutboxConfig> cfg, IEventPublisher publisher, ILogger<OutboxProcessor> logger)
-    : BackgroundService
+public class OutboxProcessor(IServiceScopeFactory scopeFactory, IOptions<OutboxConfig> cfg, IEventPublisher publisher, ILogger<OutboxProcessor> logger) : BackgroundService
 {
     private readonly OutboxConfig cfg = cfg.Value;
 
@@ -32,24 +31,57 @@ public class OutboxProcessor(IServiceScopeFactory scopeFactory, IOptions<OutboxC
                 {
                     try
                     {
-                        // optimistic: increment Attempts and mark dispatched time before sending to reduce double send window
+                        // Claim: increment Attempts and persist so that RowVersion changes.
                         msg.Attempts++;
-                        await writeDb.SaveChangesAsync(stoppingToken); // persist attempt increment
+                        await writeDb.SaveChangesAsync(stoppingToken);
+                    }
+                    catch (DbUpdateConcurrencyException)
+                    {
+                        // Another worker updated this row first (race). Skip it.
+                        logger.LogDebug("Outbox message {MessageId} was claimed/updated by another worker. Skipping.", msg.MessageId);
+                        // Reload entry from DB and continue (we won't process this copy)
+                        continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Failed to claim outbox message {MessageId}", msg.MessageId);
+                        continue;
+                    }
 
+                    try
+                    {
                         // publish raw (we stored serialized event object as Data)
                         var bytes = System.Text.Encoding.UTF8.GetBytes(msg.Data);
                         await publisher.PublishRawAsync(msg.Type, msg.MessageId, bytes, stoppingToken);
 
+                        // mark dispatched
                         msg.DispatchedAt = DateTime.UtcNow;
                         msg.LastError = null;
-                        await writeDb.SaveChangesAsync(stoppingToken);
+
+                        try
+                        {
+                            await writeDb.SaveChangesAsync(stoppingToken);
+                        }
+                        catch (DbUpdateConcurrencyException)
+                        {
+                            // Another worker may have updated/dispatched it after our claim => safe to ignore
+                            logger.LogInformation("Outbox message {MessageId} was concurrently modified when setting DispatchedAt. Likely dispatched by another instance.", msg.MessageId);
+                        }
                     }
                     catch (Exception ex)
                     {
+                        // publishing failed (Polly already retried according to policy)
                         msg.LastError = ex.Message;
-                        logger.LogError(ex, "Failed to publish outbox message {MessageId}", msg.MessageId);
-                        await writeDb.SaveChangesAsync(stoppingToken);
-                        // do not throw — continue with others
+                        logger.LogError(ex, "Failed to publish outbox message {MessageId} after retries", msg.MessageId);
+                        // persist last error and continue
+                        try
+                        {
+                            await writeDb.SaveChangesAsync(stoppingToken);
+                        }
+                        catch (DbUpdateConcurrencyException)
+                        {
+                            logger.LogInformation("Concurrent update while saving error info for message {MessageId}", msg.MessageId);
+                        }
                     }
                 }
             }
